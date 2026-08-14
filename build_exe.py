@@ -8,6 +8,7 @@ import sys
 import subprocess
 import shutil
 from pathlib import Path
+import prepare_ffmpeg
 
 def build():
     workspace = Path(__file__).parent.resolve()
@@ -15,15 +16,12 @@ def build():
     ffprobe_exe = workspace / "ffprobe.exe"
 
     if not ffmpeg_exe.exists() or not ffprobe_exe.exists():
-        print("Копирование ffmpeg и ffprobe в директорию сборщика...")
-        sys_ffmpeg = shutil.which("ffmpeg")
-        sys_ffprobe = shutil.which("ffprobe")
-        if sys_ffmpeg and sys_ffprobe:
-            shutil.copy(sys_ffmpeg, ffmpeg_exe)
-            shutil.copy(sys_ffprobe, ffprobe_exe)
-        else:
-            import compress_videos
-            compress_videos.check_and_setup_ffmpeg()
+        print("Подготовка ffmpeg и ffprobe перед сборкой...")
+        prepare_ffmpeg.prepare_ffmpeg()
+
+    if not ffmpeg_exe.exists() or not ffprobe_exe.exists():
+        print("❌ ОШИБКА: ffmpeg.exe или ffprobe.exe не найдены перед запуском PyInstaller!")
+        sys.exit(1)
 
     print("Запуск PyInstaller...")
     cmd = [
@@ -37,18 +35,22 @@ def build():
     ]
     
     res = subprocess.run(cmd, cwd=str(workspace))
-    if res.returncode == 0:
-        dist_exe = workspace / "dist" / "VideoCompressor.exe"
-        target_exe = workspace / "VideoCompressor.exe"
-        if dist_exe.exists():
-            shutil.copy2(dist_exe, target_exe)
-            print(f"\n=======================================================")
-            print(f"Сборка успешно завершена!")
-            print(f"Готовый файл: {target_exe}")
-            print(f"Размер: {target_exe.stat().st_size / (1024*1024):.1f} МБ")
-            print(f"=======================================================\n")
-    else:
-        print(f"\nОшибка при сборке PyInstaller (код {res.returncode})")
+    if res.returncode != 0:
+        print(f"\n❌ Ошибка при сборке PyInstaller (код {res.returncode})")
+        sys.exit(res.returncode)
+
+    dist_exe = workspace / "dist" / "VideoCompressor.exe"
+    target_exe = workspace / "VideoCompressor.exe"
+    if not dist_exe.exists():
+        print(f"❌ ОШИБКА: Собранный файл {dist_exe} не найден!")
+        sys.exit(1)
+
+    shutil.copy2(dist_exe, target_exe)
+    print(f"\n=======================================================")
+    print(f"✔ Сборка успешно завершена!")
+    print(f"Готовый файл: {target_exe}")
+    print(f"Размер: {target_exe.stat().st_size / (1024*1024):.1f} МБ")
+    print(f"=======================================================\n")
 
 if __name__ == "__main__":
     build()
