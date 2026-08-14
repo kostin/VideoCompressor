@@ -23,17 +23,35 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
 
       - name: Download and prepare FFmpeg
+        shell: pwsh
         run: |
-          python -c "import urllib.request, zipfile, os, shutil; print('Downloading FFmpeg...'); urllib.request.urlretrieve('https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip', 'ffmpeg.zip'); print('Extracting...'); z = zipfile.ZipFile('ffmpeg.zip'); [shutil.copyfileobj(z.open(m), open(os.path.basename(m), 'wb')) for m in z.namelist() if os.path.basename(m) in ('ffmpeg.exe', 'ffprobe.exe')]; z.close(); os.remove('ffmpeg.zip'); print('Done!')"
+          Write-Host "Downloading FFmpeg release archive..."
+          curl.exe -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+          Write-Host "Extracting ffmpeg.exe and ffprobe.exe..."
+          tar.exe -xf ffmpeg.zip --strip-components=2 "*/bin/ffmpeg.exe" "*/bin/ffprobe.exe"
+          Remove-Item ffmpeg.zip -Force
+          if (-not (Test-Path "ffmpeg.exe") -or -not (Test-Path "ffprobe.exe")) {
+            throw "ffmpeg.exe or ffprobe.exe was not extracted properly!"
+          }
+          Write-Host "FFmpeg binaries successfully prepared."
 
       - name: Build Executable
+        shell: pwsh
         run: |
           python build_exe.py
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoCompressor
+          path: VideoCompressor.exe
+          if-no-files-found: error
 
       - name: Create Release and Upload Asset
         uses: softprops/action-gh-release@v2
@@ -41,5 +59,7 @@ jobs:
         with:
           files: VideoCompressor.exe
           generate_release_notes: true
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
