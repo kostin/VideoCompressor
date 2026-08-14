@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.spec
+
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# Build and Distribution
+build/
+dist/
+*.exe.log
+
+# Large Binaries (downloaded separately or bundled via release)
+ffmpeg.exe
+ffprobe.exe
+ffmpeg
+ffprobe
+*.zip
+*.tar.gz
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
