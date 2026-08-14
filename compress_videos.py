@@ -284,6 +284,23 @@ def get_video_info(ffprobe_path: str, file_path: Path) -> dict:
         }
 
 
+def create_subtitles_file(text: str, duration: float, srt_path: Path):
+    """
+    Создает временный .srt файл субтитров из имени файла.
+    Символ '@' заменяется на перенос строки.
+    """
+    lines = text.replace("@", "\n").strip()
+    dur = max(1.0, duration)
+    h = int(dur // 3600)
+    m = int((dur % 3600) // 60)
+    s = int(dur % 60)
+    ms = int((dur - int(dur)) * 1000)
+    end_time_str = f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+    srt_content = f"1\n00:00:00,000 --> {end_time_str}\n{lines}\n"
+    with open(srt_path, "w", encoding="utf-8") as f:
+        f.write(srt_content)
+
+
 def compress_video(
     ffmpeg_path: str,
     input_file: Path,
@@ -291,12 +308,14 @@ def compress_video(
     target_size_mb: float,
     target_short_side: int,
     codec: str,
+    passes_count: int,
+    subtitles_mode: bool,
     file_index: int,
     total_files: int,
     info: dict
 ) -> bool:
     """
-    Сжатие одного видеофайла методом двух проходов (2-pass) под целевой размер и разрешение.
+    Сжатие одного видеофайла (в 1 или 2 прохода) под целевой размер, разрешение и субтитры.
     """
     duration = info["duration"]
     orig_size = info["size"]
@@ -306,12 +325,12 @@ def compress_video(
     print(f"[{file_index}/{total_files}] {Colors.CYAN}{Colors.BOLD}{input_file.name}{Colors.RESET}")
     print(f"  Исходный размер: {Colors.YELLOW}{format_size(orig_size)}{Colors.RESET} | Длительность: {Colors.YELLOW}{format_seconds(duration)}{Colors.RESET} | Разрешение: {Colors.YELLOW}{info['width']}x{info['height']}{Colors.RESET}")
 
-    # Проверка: если размер и разрешение уже не превышают целевые, пережатие не требуется
+    # Проверка: если размер и разрешение уже не превышают целевые И не включены субтитры, пережатие не требуется
     orig_shorter_side = min(info["width"], info["height"]) if (info["width"] > 0 and info["height"] > 0) else 0
     size_ok = orig_size <= target_size_bytes
     res_ok = (orig_shorter_side <= target_short_side) if orig_shorter_side > 0 else True
 
-    if size_ok and res_ok:
+    if size_ok and res_ok and not subtitles_mode:
         print(f"  {Colors.GREEN}✔ Видео уже соответствует целевым параметрам{Colors.RESET} (размер {format_size(orig_size)} <= {target_size_mb:.1f} МБ, {info['width']}x{info['height']} <= {target_short_side}p).")
         print(f"  {Colors.CYAN}➜ Пережатие не требуется. Копирование оригинала в папку 'compressed'...{Colors.RESET}")
         try:
@@ -341,60 +360,90 @@ def compress_video(
         print(f"  {Colors.YELLOW}⚠ Внимание: целевой размер слишком мал для длительности ({format_seconds(duration)}). Установлен мин. битрейт 50 kbps.{Colors.RESET}")
         video_bitrate_kbps = 50
 
-    print(f"  Целевой размер: {Colors.GREEN}{target_size_mb:.1f} МБ{Colors.RESET} | Расчетный видео-битрейт: {Colors.GREEN}{int(video_bitrate_kbps)} kbps{Colors.RESET}")
+    print(f"  Целевой размер: {Colors.GREEN}{target_size_mb:.1f} МБ{Colors.RESET} | Расчетный видео-битрейт: {Colors.GREEN}{int(video_bitrate_kbps)} kbps{Colors.RESET} | Режим: {Colors.GREEN}{passes_count} проход(а){Colors.RESET}")
+    if subtitles_mode:
+        print(f"  Субтитры: {Colors.CYAN}Включены (текст из имени файла){Colors.RESET}")
 
     # Фильтр масштабирования: меньшая сторона = min(оригинальная_меньшая_сторона, target_short_side)
-    # Формула сохраняет ориентацию (альбомная/портретная) и округляет до четных значений
     scale_filter = (
         f"scale='if(lt(iw,ih),min(iw,{target_short_side}),-2)':"
         f"'if(lt(iw,ih),-2,min(ih,{target_short_side}))'"
     )
 
+    # Подготовка субтитров
+    srt_path = input_file.parent / f"_temp_sub_{file_index}.srt"
+    if subtitles_mode:
+        create_subtitles_file(input_file.stem, duration, srt_path)
+        escaped_srt = str(srt_path.resolve()).replace("\\", "/").replace(":", "\\:")
+        video_filter = (
+            f"{scale_filter},subtitles=filename='{escaped_srt}':"
+            f"force_style='FontSize=14,Alignment=1,MarginL=14,MarginV=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0'"
+        )
+    else:
+        video_filter = scale_filter
+
     # Выбор энкодера
     v_encoder = "libx264" if codec == "h264" else "libx265"
     passlog_prefix = str((input_file.parent / f"_temp_pass_{file_index}").resolve()).replace("\\", "/")
 
-    # Проход 1: Анализ (без аудио, вывод в null)
-    null_sink = "NUL" if sys.platform == "win32" else "/dev/null"
-    pass1_cmd = [
-        ffmpeg_path, "-y",
-        "-nostats", "-loglevel", "error",
-        "-i", str(input_file),
-        "-c:v", v_encoder,
-        "-b:v", f"{int(video_bitrate_kbps)}k",
-        "-pass", "1",
-        "-passlogfile", passlog_prefix,
-        "-an",
-        "-vf", scale_filter,
-        "-preset", "medium",
-        "-f", "null",
-        "-progress", "pipe:1",
-        null_sink
-    ]
+    if passes_count == 1:
+        # Однопроходное кодирование (быстрее)
+        pass_cmd = [
+            ffmpeg_path, "-y",
+            "-nostats", "-loglevel", "error",
+            "-i", str(input_file),
+            "-c:v", v_encoder,
+            "-b:v", f"{int(video_bitrate_kbps)}k",
+            "-maxrate", f"{int(video_bitrate_kbps * 1.4)}k",
+            "-bufsize", f"{int(video_bitrate_kbps * 2)}k",
+            "-c:a", "aac",
+            "-b:a", f"{audio_bitrate_kbps}k" if info["has_audio"] else "0k",
+            "-vf", video_filter,
+            "-preset", "medium",
+            "-movflags", "+faststart",
+            "-progress", "pipe:1",
+            str(output_file)
+        ]
+        passes = [("Сжатие (1 проход)", pass_cmd)]
+    else:
+        # Двухпроходное кодирование (точнее)
+        null_sink = "NUL" if sys.platform == "win32" else "/dev/null"
+        pass1_cmd = [
+            ffmpeg_path, "-y",
+            "-nostats", "-loglevel", "error",
+            "-i", str(input_file),
+            "-c:v", v_encoder,
+            "-b:v", f"{int(video_bitrate_kbps)}k",
+            "-pass", "1",
+            "-passlogfile", passlog_prefix,
+            "-an",
+            "-vf", video_filter,
+            "-preset", "medium",
+            "-f", "null",
+            "-progress", "pipe:1",
+            null_sink
+        ]
 
-    # Проход 2: Финальное кодирование
-    pass2_cmd = [
-        ffmpeg_path, "-y",
-        "-nostats", "-loglevel", "error",
-        "-i", str(input_file),
-        "-c:v", v_encoder,
-        "-b:v", f"{int(video_bitrate_kbps)}k",
-        "-pass", "2",
-        "-passlogfile", passlog_prefix,
-        "-c:a", "aac",
-        "-b:a", f"{audio_bitrate_kbps}k" if info["has_audio"] else "0k",
-        "-vf", scale_filter,
-        "-preset", "medium",
-        "-movflags", "+faststart",
-        "-progress", "pipe:1",
-        str(output_file)
-    ]
-
-    # Выполнение проходов с отображением прогресса
-    passes = [
-        ("Проход 1/2 (Анализ)", pass1_cmd),
-        ("Проход 2/2 (Сжатие)", pass2_cmd)
-    ]
+        pass2_cmd = [
+            ffmpeg_path, "-y",
+            "-nostats", "-loglevel", "error",
+            "-i", str(input_file),
+            "-c:v", v_encoder,
+            "-b:v", f"{int(video_bitrate_kbps)}k",
+            "-pass", "2",
+            "-passlogfile", passlog_prefix,
+            "-c:a", "aac",
+            "-b:a", f"{audio_bitrate_kbps}k" if info["has_audio"] else "0k",
+            "-vf", video_filter,
+            "-preset", "medium",
+            "-movflags", "+faststart",
+            "-progress", "pipe:1",
+            str(output_file)
+        ]
+        passes = [
+            ("Проход 1/2 (Анализ)", pass1_cmd),
+            ("Проход 2/2 (Сжатие)", pass2_cmd)
+        ]
 
     for pass_name, cmd in passes:
         start_time = time.time()
@@ -444,11 +493,11 @@ def compress_video(
 
         if process.returncode != 0:
             print(f"  {Colors.RED}❌ Ошибка выполнения FFmpeg ({pass_name}):{Colors.RESET}\n{stderr_data[:500] if stderr_data else 'Код ошибки: ' + str(process.returncode)}")
-            _cleanup_logs(input_file.parent, f"_temp_pass_{file_index}")
+            _cleanup_temp_files(input_file.parent, file_index)
             return False
 
-    # Удаление временных файлов passlog
-    _cleanup_logs(input_file.parent, f"_temp_pass_{file_index}")
+    # Удаление временных файлов passlog и srt
+    _cleanup_temp_files(input_file.parent, file_index)
 
     if output_file.exists():
         final_size = output_file.stat().st_size
@@ -458,16 +507,22 @@ def compress_video(
     return False
 
 
-def _cleanup_logs(directory: Path, prefix: str):
-    """Удаление временных лог-файлов 2-pass кодирования"""
-    for file in directory.glob(f"{prefix}*"):
+def _cleanup_temp_files(directory: Path, file_index: int):
+    """Удаление временных файлов (passlog, srt)"""
+    for file in directory.glob(f"_temp_pass_{file_index}*"):
         try:
             file.unlink()
         except Exception:
             pass
+    srt_file = directory / f"_temp_sub_{file_index}.srt"
+    if srt_file.exists():
+        try:
+            srt_file.unlink()
+        except Exception:
+            pass
 
 
-def prompt_user_settings() -> tuple[float, int, str]:
+def prompt_user_settings() -> tuple[float, int, str, int, bool]:
     """Интерактивный опрос пользователя о параметрах сжатия"""
     print(f"{Colors.BOLD}{Colors.CYAN}══════════════════════════════════════════════════════════════════{Colors.RESET}")
     print(f"{Colors.BOLD}             НАСТРОЙКИ СЖАТИЯ ВИДЕО (Video Compressor)            {Colors.RESET}")
@@ -489,6 +544,7 @@ def prompt_user_settings() -> tuple[float, int, str]:
             print(f"{Colors.RED}Пожалуйста, введите корректное число.{Colors.RESET}")
 
     # 2. Целевое разрешение
+    print()
     while True:
         raw_res = input(f"2) Введите целевое разрешение по меньшей стороне в px [{Colors.GREEN}1080{Colors.RESET}]: ").strip()
         if not raw_res:
@@ -505,17 +561,33 @@ def prompt_user_settings() -> tuple[float, int, str]:
 
     # 3. Выбор кодека
     print(f"\n3) Выберите кодек сжатия:")
-    print(f"   [1] {Colors.BOLD}H.264 (AVC){Colors.RESET} — максимальная совместимость с любыми плеерами/телевизорами [По умолчанию]")
-    print(f"   [2] {Colors.BOLD}H.265 (HEVC){Colors.RESET} — лучшее качество при сильном сжатии (требует больше времени)")
-    codec_choice = input("Ваш выбор [1/2]: ").strip()
+    print(f"   {Colors.GREEN}{Colors.BOLD}[1] H.264 (AVC){Colors.RESET} — максимальная совместимость с любыми плеерами/телевизорами {Colors.GREEN}[По умолчанию]{Colors.RESET}")
+    print(f"   [2] H.265 (HEVC) — лучшее качество при сильном сжатии (требует больше времени)")
+    codec_choice = input(f"Ваш выбор [{Colors.GREEN}1{Colors.RESET}/2]: ").strip()
     codec = "h265" if codec_choice == "2" else "h264"
+
+    # 4. Выбор количества проходов
+    print(f"\n4) Режим кодирования:")
+    print(f"   [1] 1 проход  — в ~2 раза быстрее (размер может незначительно отклоняться)")
+    print(f"   {Colors.GREEN}{Colors.BOLD}[2] 2 прохода{Colors.RESET} — максимальная точность размера и оптимальное качество {Colors.GREEN}[По умолчанию]{Colors.RESET}")
+    passes_choice = input(f"Ваш выбор [1/{Colors.GREEN}2{Colors.RESET}]: ").strip()
+    passes_count = 1 if passes_choice == "1" else 2
+
+    # 5. Наложение субтитров
+    print(f"\n5) Наложение субтитров:")
+    print(f"   {Colors.GREEN}{Colors.BOLD}[1] Не накладывать{Colors.RESET} {Colors.GREEN}[По умолчанию]{Colors.RESET}")
+    print(f"   [2] Наложить субтитры. Текст для субтитров будет взят из имени файла. Если в имени встретятся символы @, то вместо каждого такого символа будет сделан переход на новую строку в субтитрах")
+    sub_choice = input(f"Ваш выбор [{Colors.GREEN}1{Colors.RESET}/2]: ").strip()
+    subtitles_mode = (sub_choice == "2")
 
     print(f"\n{Colors.GREEN}Параметры сжатия приняты:{Colors.RESET}")
     print(f"  • Целевой размер: {target_size_mb} МБ")
     print(f"  • Разрешение (меньшая сторона): {target_short_side}p")
-    print(f"  • Кодек: {codec.upper()}\n")
+    print(f"  • Кодек: {codec.upper()}")
+    print(f"  • Режим: {passes_count} проход(а)")
+    print(f"  • Субтитры: {'Да (из имени файла)' if subtitles_mode else 'Нет'}\n")
 
-    return target_size_mb, target_short_side, codec
+    return target_size_mb, target_short_side, codec, passes_count, subtitles_mode
 
 
 def main():
@@ -546,7 +618,7 @@ def main():
     print()
 
     # 3. Интерактивные настройки
-    target_size_mb, target_short_side, codec = prompt_user_settings()
+    target_size_mb, target_short_side, codec, passes_count, subtitles_mode = prompt_user_settings()
 
     # 4. Создание папки для сжатых видео
     output_dir.mkdir(exist_ok=True)
@@ -568,6 +640,8 @@ def main():
             target_size_mb=target_size_mb,
             target_short_side=target_short_side,
             codec=codec,
+            passes_count=passes_count,
+            subtitles_mode=subtitles_mode,
             file_index=idx,
             total_files=len(video_files),
             info=info

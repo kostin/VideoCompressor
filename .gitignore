@@ -17,6 +17,8 @@ dist/
 # Large Binaries (downloaded separately or bundled via release)
 ffmpeg.exe
 ffprobe.exe
+VideoCompressor.exe
+*.exe
 ffmpeg
 ffprobe
 *.zip
