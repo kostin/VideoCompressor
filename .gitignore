@@ -14,11 +14,11 @@ build/
 dist/
 *.exe.log
 
-# Large Binaries (downloaded separately or bundled via release)
-ffmpeg.exe
-ffprobe.exe
+# Large Binaries (distributed via GitHub Releases)
 VideoCompressor.exe
 *.exe
+ffmpeg.exe
+ffprobe.exe
 ffmpeg
 ffprobe
 *.zip
