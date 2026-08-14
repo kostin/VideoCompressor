@@ -189,7 +189,7 @@ def check_and_setup_ffmpeg() -> tuple[str, str]:
     print(f"{Colors.YELLOW}⚠ FFmpeg с необходимыми кодеками не найден в системе.{Colors.RESET}")
     print(f"{Colors.CYAN}Начинается автоматическая загрузка FFmpeg для Windows...{Colors.RESET}")
 
-    zip_path = script_dir / "ffmpeg_download.zip"
+    zip_path = app_dir / "ffmpeg_download.zip"
     try:
         try:
             download_with_progress(FFMPEG_WINDOWS_URL, zip_path)
@@ -203,7 +203,7 @@ def check_and_setup_ffmpeg() -> tuple[str, str]:
                 filename = os.path.basename(member)
                 if filename in ("ffmpeg.exe", "ffprobe.exe"):
                     source = zip_ref.open(member)
-                    target_file = script_dir / filename
+                    target_file = app_dir / filename
                     with open(target_file, "wb") as target:
                         shutil.copyfileobj(source, target)
                     print(f"  {Colors.GREEN}✔ Извлечен:{Colors.RESET} {filename}")
