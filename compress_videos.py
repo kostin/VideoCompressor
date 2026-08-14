@@ -310,12 +310,13 @@ def compress_video(
     codec: str,
     passes_count: int,
     subtitles_mode: bool,
+    remove_audio: bool,
     file_index: int,
     total_files: int,
     info: dict
 ) -> bool:
     """
-    Сжатие одного видеофайла (в 1 или 2 прохода) под целевой размер, разрешение и субтитры.
+    Сжатие одного видеофайла (в 1 или 2 прохода) под целевой размер, разрешение, субтитры и звук.
     """
     duration = info["duration"]
     orig_size = info["size"]
@@ -325,12 +326,13 @@ def compress_video(
     print(f"[{file_index}/{total_files}] {Colors.CYAN}{Colors.BOLD}{input_file.name}{Colors.RESET}")
     print(f"  Исходный размер: {Colors.YELLOW}{format_size(orig_size)}{Colors.RESET} | Длительность: {Colors.YELLOW}{format_seconds(duration)}{Colors.RESET} | Разрешение: {Colors.YELLOW}{info['width']}x{info['height']}{Colors.RESET}")
 
-    # Проверка: если размер и разрешение уже не превышают целевые И не включены субтитры, пережатие не требуется
+    # Проверка: если размер и разрешение уже не превышают целевые, не включены субтитры и не требуется удалять звук
     orig_shorter_side = min(info["width"], info["height"]) if (info["width"] > 0 and info["height"] > 0) else 0
     size_ok = orig_size <= target_size_bytes
     res_ok = (orig_shorter_side <= target_short_side) if orig_shorter_side > 0 else True
+    needs_audio_removal = remove_audio and info["has_audio"]
 
-    if size_ok and res_ok and not subtitles_mode:
+    if size_ok and res_ok and not subtitles_mode and not needs_audio_removal:
         print(f"  {Colors.GREEN}✔ Видео уже соответствует целевым параметрам{Colors.RESET} (размер {format_size(orig_size)} <= {target_size_mb:.1f} МБ, {info['width']}x{info['height']} <= {target_short_side}p).")
         print(f"  {Colors.CYAN}➜ Пережатие не требуется. Копирование оригинала в папку 'compressed'...{Colors.RESET}")
         try:
@@ -346,10 +348,12 @@ def compress_video(
         return False
 
     # Расчет целевого битрейта
-    # Аудио: 128 kbps (или 96 kbps, если видео очень короткое/маленькое)
-    audio_bitrate_kbps = 128 if target_size_mb >= 50 else 96
-    if not info["has_audio"]:
+    if remove_audio or not info["has_audio"]:
         audio_bitrate_kbps = 0
+        audio_args = ["-an"]
+    else:
+        audio_bitrate_kbps = 128 if target_size_mb >= 50 else 96
+        audio_args = ["-c:a", "aac", "-b:a", f"{audio_bitrate_kbps}k"]
 
     # Общий битрейт (в килобитах/сек): target_bits / duration
     total_bitrate_kbps = (target_size_bytes * 8) / (duration * 1000)
@@ -363,6 +367,8 @@ def compress_video(
     print(f"  Целевой размер: {Colors.GREEN}{target_size_mb:.1f} МБ{Colors.RESET} | Расчетный видео-битрейт: {Colors.GREEN}{int(video_bitrate_kbps)} kbps{Colors.RESET} | Режим: {Colors.GREEN}{passes_count} проход(а){Colors.RESET}")
     if subtitles_mode:
         print(f"  Субтитры: {Colors.CYAN}Включены (текст из имени файла){Colors.RESET}")
+    if remove_audio and info["has_audio"]:
+        print(f"  Звук: {Colors.YELLOW}Удаление звуковой дорожки{Colors.RESET}")
 
     # Фильтр масштабирования: меньшая сторона = min(оригинальная_меньшая_сторона, target_short_side)
     scale_filter = (
@@ -396,8 +402,7 @@ def compress_video(
             "-b:v", f"{int(video_bitrate_kbps)}k",
             "-maxrate", f"{int(video_bitrate_kbps * 1.4)}k",
             "-bufsize", f"{int(video_bitrate_kbps * 2)}k",
-            "-c:a", "aac",
-            "-b:a", f"{audio_bitrate_kbps}k" if info["has_audio"] else "0k",
+            *audio_args,
             "-vf", video_filter,
             "-preset", "medium",
             "-movflags", "+faststart",
@@ -432,8 +437,7 @@ def compress_video(
             "-b:v", f"{int(video_bitrate_kbps)}k",
             "-pass", "2",
             "-passlogfile", passlog_prefix,
-            "-c:a", "aac",
-            "-b:a", f"{audio_bitrate_kbps}k" if info["has_audio"] else "0k",
+            *audio_args,
             "-vf", video_filter,
             "-preset", "medium",
             "-movflags", "+faststart",
@@ -522,7 +526,7 @@ def _cleanup_temp_files(directory: Path, file_index: int):
             pass
 
 
-def prompt_user_settings() -> tuple[float, int, str, int, bool]:
+def prompt_user_settings() -> tuple[float, int, str, int, bool, bool]:
     """Интерактивный опрос пользователя о параметрах сжатия"""
     print(f"{Colors.BOLD}{Colors.CYAN}══════════════════════════════════════════════════════════════════{Colors.RESET}")
     print(f"{Colors.BOLD}             НАСТРОЙКИ СЖАТИЯ ВИДЕО (Video Compressor)            {Colors.RESET}")
@@ -580,14 +584,22 @@ def prompt_user_settings() -> tuple[float, int, str, int, bool]:
     sub_choice = input(f"Ваш выбор [{Colors.GREEN}1{Colors.RESET}/2]: ").strip()
     subtitles_mode = (sub_choice == "2")
 
+    # 6. Удаление звука
+    print(f"\n6) Убрать звук:")
+    print(f"   {Colors.GREEN}{Colors.BOLD}[1] Не убирать{Colors.RESET} {Colors.GREEN}[По умолчанию]{Colors.RESET}")
+    print(f"   [2] Убрать. В этом случае из видео будет полностью удалена звуковая дорожка")
+    audio_choice = input(f"Ваш выбор [{Colors.GREEN}1{Colors.RESET}/2]: ").strip()
+    remove_audio = (audio_choice == "2")
+
     print(f"\n{Colors.GREEN}Параметры сжатия приняты:{Colors.RESET}")
     print(f"  • Целевой размер: {target_size_mb} МБ")
     print(f"  • Разрешение (меньшая сторона): {target_short_side}p")
     print(f"  • Кодек: {codec.upper()}")
     print(f"  • Режим: {passes_count} проход(а)")
-    print(f"  • Субтитры: {'Да (из имени файла)' if subtitles_mode else 'Нет'}\n")
+    print(f"  • Субтитры: {'Да (из имени файла)' if subtitles_mode else 'Нет'}")
+    print(f"  • Звук: {'Удалить' if remove_audio else 'Сохранить'}\n")
 
-    return target_size_mb, target_short_side, codec, passes_count, subtitles_mode
+    return target_size_mb, target_short_side, codec, passes_count, subtitles_mode, remove_audio
 
 
 def main():
@@ -618,7 +630,7 @@ def main():
     print()
 
     # 3. Интерактивные настройки
-    target_size_mb, target_short_side, codec, passes_count, subtitles_mode = prompt_user_settings()
+    target_size_mb, target_short_side, codec, passes_count, subtitles_mode, remove_audio = prompt_user_settings()
 
     # 4. Создание папки для сжатых видео
     output_dir.mkdir(exist_ok=True)
@@ -642,6 +654,7 @@ def main():
             codec=codec,
             passes_count=passes_count,
             subtitles_mode=subtitles_mode,
+            remove_audio=remove_audio,
             file_index=idx,
             total_files=len(video_files),
             info=info

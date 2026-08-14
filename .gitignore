@@ -29,3 +29,6 @@ ffprobe
 .idea/
 .DS_Store
 Thumbs.db
+
+# AI Agents
+AGENTS.md
