@@ -24,6 +24,23 @@ ffprobe
 *.zip
 *.tar.gz
 
+# Media and test files
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.wmv
+*.flv
+*.webm
+*.m4v
+*.ts
+*.mts
+*.m2ts
+*.3gp
+compressed/
+_temp_*
+*.srt
+
 # IDE and OS files
 .vscode/
 .idea/
